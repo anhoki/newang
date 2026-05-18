@@ -1,0 +1,254 @@
+# montana_rusa_selector.py
+# Instalar: pip install streamlit pandas numpy matplotlib scipy
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+
+st.set_page_config(page_title="Selector de Montaña Rusa", layout="wide")
+
+# ============================================================
+# 1. FUNCIONES DE AJUSTE EXPONENCIAL
+# ============================================================
+
+def exponencial_crecimiento(t, A, k, B):
+    """Modelo: y = A * exp(k * t) + B"""
+    return A * np.exp(k * t) + B
+
+def ajustar_exponencial(y_vals):
+    """Ajusta exponencial y devuelve k, A, R², longitud_arco"""
+    x_vals = np.arange(len(y_vals))
+    
+    # Estimación inicial
+    y_max = y_vals.max()
+    y_min = y_vals.min()
+    A0 = (y_max - y_min) * 0.5
+    k0 = 0.1
+    B0 = y_min
+    
+    try:
+        params, _ = curve_fit(exponencial_crecimiento, x_vals, y_vals, 
+                              p0=[A0, k0, B0], maxfev=5000)
+        A, k, B = params
+        
+        # R²
+        y_pred = exponencial_crecimiento(x_vals, A, k, B)
+        ss_res = np.sum((y_vals - y_pred) ** 2)
+        ss_tot = np.sum((y_vals - np.mean(y_vals)) ** 2)
+        r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+        
+        # Longitud de arco (desde t=0 hasta t=n-1)
+        horizonte = len(y_vals) - 1
+        pasos = 100
+        dt = horizonte / pasos
+        longitud = 0
+        for i in range(pasos):
+            t = i * dt
+            t_next = (i + 1) * dt
+            ft = exponencial_crecimiento(t, A, k, B)
+            ft_next = exponencial_crecimiento(t_next, A, k, B)
+            dy = ft_next - ft
+            dx = dt
+            longitud += np.sqrt(dx*dx + dy*dy)
+        
+        # Pendiente final (fuerza al final del período)
+        pendiente_final = A * k * np.exp(k * (len(y_vals)-1))
+        
+        return k, A, B, r2, longitud, pendiente_final, y_pred
+    
+    except:
+        return 0, 0, 0, 0, 0, 0, np.zeros_like(y_vals)
+
+# ============================================================
+# 2. CARGA DE DATOS
+# ============================================================
+
+st.title("🎢 Selector de Montaña Rusa")
+st.markdown("¿Cuál de estos 5 candidatos tiene la **mejor curva** para subirse ahora?")
+
+# Opción: subir archivo CSV o usar datos de ejemplo
+opcion = st.radio("Origen de datos", ["Usar datos de ejemplo", "Subir CSV con mis datos"])
+
+if opcion == "Subir CSV con mis datos":
+    archivo = st.file_uploader("Sube un CSV con columnas: Ticker, Vela, Votos_Neto, Precio", type="csv")
+    if archivo:
+        df = pd.read_csv(archivo)
+    else:
+        st.warning("Esperando archivo... usando datos de ejemplo")
+        opcion = "Usar datos de ejemplo"
+
+if opcion == "Usar datos de ejemplo":
+    # Datos simulados para 5 activos
+    datos = {
+        "Ticker": ["AAPL"]*20 + ["MSFT"]*20 + ["TSLA"]*20 + ["AMZN"]*20 + ["GOOGL"]*20,
+        "Vela": list(range(20))*5,
+        "Votos_Neto": [
+            # AAPL
+            1,1,3,3,5,5,3,3,1,1,3,3,5,5,3,4,4,5,5,4,
+            # MSFT (decaimiento)
+            -1,-1,-3,-3,-5,-5,-3,-3,-1,-1,-3,-3,-5,-5,-3,-4,-4,-5,-5,-4,
+            # TSLA (crecimiento fuerte)
+            3,3,5,5,5,5,3,3,5,5,5,5,3,3,5,5,5,5,5,5,
+            # AMZN (medio)
+            2,2,3,3,4,4,3,3,2,2,3,3,4,4,3,3,4,4,4,4,
+            # GOOGL (errático)
+            1,3,1,3,5,3,1,3,5,3,1,3,5,3,1,3,5,3,1,3,
+        ]
+    }
+    df = pd.DataFrame(datos)
+
+# ============================================================
+# 3. CÁLCULOS POR ACTIVO
+# ============================================================
+
+# Suavizado EMA5
+def ema(series, alpha=0.3):
+    result = np.zeros_like(series)
+    result[0] = series[0]
+    for i in range(1, len(series)):
+        result[i] = alpha * series[i] + (1-alpha) * result[i-1]
+    return result
+
+df['EMA5'] = df.groupby('Ticker')['Votos_Neto'].transform(lambda x: ema(x.values))
+
+# Ajuste exponencial por activo
+resultados = []
+tickers = df['Ticker'].unique()
+
+for ticker in tickers:
+    sub = df[df['Ticker'] == ticker].copy()
+    y_vals = sub['EMA5'].values
+    
+    # Solo usar valores positivos para log
+    y_pos = np.maximum(y_vals, 0.1)
+    
+    k, A, B, r2, longitud, pend_final, y_pred = ajustar_exponencial(y_pos)
+    
+    resultados.append({
+        "Ticker": ticker,
+        "k (pendiente)": k,
+        "A (amplitud)": A,
+        "R²": r2,
+        "Longitud_arco": longitud,
+        "Pendiente_final": pend_final,
+        "y_pred": y_pred,
+        "y_real": y_vals
+    })
+
+# Crear DataFrame de ranking
+df_ranking = pd.DataFrame(resultados)
+df_ranking['Puntaje'] = (
+    (df_ranking['Longitud_arco'] / df_ranking['Longitud_arco'].max()) * 0.5 +
+    (df_ranking['Pendiente_final'] / df_ranking['Pendiente_final'].max()) * 0.3 +
+    (df_ranking['k (pendiente)'] / df_ranking['k (pendiente)'].max()) * 0.2
+)
+df_ranking = df_ranking.sort_values('Puntaje', ascending=False)
+df_ranking['Puntaje'] = df_ranking['Puntaje'] / df_ranking['Puntaje'].max()
+
+# ============================================================
+# 4. DASHBOARD
+# ============================================================
+
+col1, col2 = st.columns([1, 2])
+
+with col1:
+    st.subheader("🏆 Ranking de Montañas Rusas")
+    st.dataframe(
+        df_ranking[['Ticker', 'k (pendiente)', 'R²', 'Longitud_arco', 'Puntaje']]
+        .style.format({
+            'k (pendiente)': '{:.3f}',
+            'R²': '{:.2f}',
+            'Longitud_arco': '{:.2f}',
+            'Puntaje': '{:.0%}'
+        }),
+        use_container_width=True
+    )
+    
+    mejor = df_ranking.iloc[0]
+    st.success(f"🎢 **MEJOR CANDIDATO: {mejor['Ticker']}**")
+    st.metric("Puntaje", f"{mejor['Puntaje']:.0%}")
+    st.metric("Longitud de arco", f"{mejor['Longitud_arco']:.2f}")
+    st.metric("Pendiente (k)", f"{mejor['k (pendiente)']:.3f}")
+    
+    st.caption("Montaña rusa = más longitud de arco + más pendiente final")
+
+with col2:
+    st.subheader("📈 Curvas de cada candidato")
+    
+    fig, ax = plt.subplots(figsize=(8, 5))
+    colores = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+    
+    for i, row in df_ranking.iterrows():
+        ticker = row['Ticker']
+        sub = df[df['Ticker'] == ticker]
+        color = colores[i % len(colores)]
+        ax.plot(sub['Vela'], sub['EMA5'], 'o-', color=color, label=f"{ticker} (real)", alpha=0.7)
+        ax.plot(sub['Vela'], row['y_pred'], '--', color=color, label=f"{ticker} (exp)", alpha=0.5, linewidth=1.5)
+    
+    ax.set_xlabel("Vela (tiempo)")
+    ax.set_ylabel("Votos Netos Suavizados (EMA5)")
+    ax.set_title("Comparativa de curvas reales vs exponenciales")
+    ax.legend(loc='upper left', fontsize=8, ncol=2)
+    ax.grid(True, alpha=0.3)
+    st.pyplot(fig)
+
+# ============================================================
+# 5. DETALLE POR ACTIVO
+# ============================================================
+
+st.subheader("🔍 Detalle individual")
+
+for i, row in df_ranking.iterrows():
+    ticker = row['Ticker']
+    sub = df[df['Ticker'] == ticker]
+    
+    with st.expander(f"{ticker} - k={row['k (pendiente)']:.3f}, R²={row['R²']:.2f}, Longitud={row['Longitud_arco']:.2f}"):
+        fig2, ax2 = plt.subplots(figsize=(10, 3))
+        ax2.plot(sub['Vela'], sub['EMA5'], 'o-', color='blue', label='Real (EMA5)', linewidth=2)
+        ax2.plot(sub['Vela'], row['y_pred'], '--', color='red', label='Exponencial ajustada', linewidth=2)
+        ax2.set_xlabel("Vela")
+        ax2.set_ylabel("Votos Netos")
+        ax2.set_title(f"{ticker} - Curva real vs exponencial")
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        st.pyplot(fig2)
+        
+        col_a, col_b, col_c, col_d = st.columns(4)
+        col_a.metric("Pendiente (k)", f"{row['k (pendiente)']:.3f}")
+        col_b.metric("Amplitud (A)", f"{row['A (amplitud)']:.2f}")
+        col_c.metric("R²", f"{row['R²']:.2f}")
+        col_d.metric("Pendiente final", f"{row['Pendiente_final']:.2f}")
+
+# ============================================================
+# 6. EXPORTAR DECISIÓN
+# ============================================================
+
+st.divider()
+st.subheader("🎯 Decisión para la estrategia")
+
+if st.button("✅ Seleccionar este candidato para operar"):
+    st.success(f"""
+    **Orden sugerida:**
+    - Activo: {mejor['Ticker']}
+    - Tamaño base: 1.0
+    - Ajuste por montaña rusa: {mejor['Puntaje']:.0%}
+    - Tamaño final: {mejor['Puntaje']:.2f}x
+    - Confianza: {mejor['R²']:.0%}
+    """)
+    
+    st.code(f"""
+    # Código para PineScript / Estrategia
+    mejor_candidato = "{mejor['Ticker']}"
+    factor_tamanio = {mejor['Puntaje']:.2f}
+    confianza = {mejor['R²']:.2f}
+    """, language="python")
+
+st.caption("""
+**Interpretación:**
+- Mayor longitud de arco = más "recorrido" en la montaña rusa
+- Mayor pendiente final = más fuerza al final del período
+- Mayor R² = la curva exponencial se ajusta bien (señal limpia)
+- **El mejor candidato es el que promete la montaña rusa más divertida**
+""")
